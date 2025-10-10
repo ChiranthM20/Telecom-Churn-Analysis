@@ -12,6 +12,7 @@ import pandas as pd
 import os
 
 MODEL_DIR = "models"
+# Assuming all joblib files exist after running src/train.py
 meta = joblib.load(os.path.join(MODEL_DIR, "meta.joblib"))
 rf = joblib.load(os.path.join(MODEL_DIR, "rf.joblib"))
 scaler = joblib.load(os.path.join(MODEL_DIR, "scaler.joblib"))
@@ -24,13 +25,15 @@ for c in meta.get('cat_cols', []):
 app = FastAPI(title="Churn Predictor API")
 
 class CustomerRecord(BaseModel):
-    # Accept a flexible dict shape; common fields:
+    # Must list all required features defined in meta['feature_columns']
+    # Example fields based on your previous code:
     customerID: str = None
     tenure: float = 0
     MonthlyCharges: float = 0.0
     TotalCharges: float = 0.0
-    Tenure_Group: str = None
-    PaymentMethod: str = None
+    Tenure_Group: str = None # Added for consistency
+    PaymentMethod: str = None # Added for consistency
+    # Note: In a real-world API, you would include ALL features from the raw data.
 
 @app.post("/predict")
 def predict(record: CustomerRecord):
@@ -43,6 +46,7 @@ def predict(record: CustomerRecord):
     # apply encoders
     for c, le in encoders.items():
         if c in X.columns:
+            # Safely handle unseen categorical values by mapping to "NA" (if "NA" was used in training)
             val = str(X.at[0, c]) if X.at[0, c] is not None else "NA"
             if val not in set(le.classes_):
                 val = "NA"

@@ -6,7 +6,7 @@ and write churn_prob & churn_pred back to Fact_CustomerActivity (DB).
 import os
 import joblib
 import pandas as pd
-from db import engine
+from db import engine # Import engine from db.py
 
 MODEL_DIR = "models"
 
@@ -22,20 +22,19 @@ def load_stuff():
     return rf, scaler, meta, encoders
 
 def load_fact():
+    # Corrected table name
     df = pd.read_sql("SELECT * FROM Fact_CustomerActivity", engine)
     return df
 
-def prepare_X(df, meta, encoders):
+def prepare_X(df, meta, encoders, scaler):
     # prepare feature matrix consistent with training
     X = pd.DataFrame()
     for c in meta['feature_columns']:
         if c in df.columns:
             X[c] = df[c]
         else:
-            # missing column -> fill default
             X[c] = 0
 
-    # numeric inverse transform if scaler expects numeric standardization
     num_cols = meta.get('num_cols', [])
     for c in num_cols:
         if c in X.columns:
@@ -45,47 +44,38 @@ def prepare_X(df, meta, encoders):
     for c, le in encoders.items():
         if c in X.columns:
             X[c] = X[c].astype(str).fillna("NA")
-            # handle unseen labels - map to a nearest known label index (use transform with try/except)
             known = set(le.classes_)
             X[c] = X[c].apply(lambda val: val if val in known else "NA")
             try:
                 X[c] = le.transform(X[c])
             except Exception:
-                # fallback: produce zeros if transform fails
                 X[c] = 0
 
     # scale numeric using scaler
-    scaler = joblib.load(os.path.join(MODEL_DIR, "scaler.joblib"))
     if num_cols:
         X[num_cols] = scaler.transform(X[num_cols])
 
     return X
 
 def write_predictions(df_with_preds):
-    # Only keep the fields we need to update in FACT table
-    # Using to_sql replace the table; to update in-place you'd use SQLAlchemy core/upsert.
-    # Here we'll replace table for simplicity but keep columns that already exist.
-    temp_table = "Fact_CustomerActivity"
-    df_up = df_with_preds.copy()
-    # Keep all original columns plus churn_prob/churn_pred
-    df_up.to_sql(temp_table, engine, if_exists='replace', index=False)
-    print(f"Predictions written to table {temp_table} (replaced).")
+    # Overwrite the original Fact table with the new columns added (churn_prob, churn_pred)
+    df_with_preds.to_sql('Fact_CustomerActivity', engine, if_exists='replace', index=False)
+    print("Predictions written to table Fact_CustomerActivity (replaced).")
 
 def main():
     rf, scaler, meta, encoders = load_stuff()
     df_fact = load_fact()
     if df_fact.empty:
-        raise SystemExit("Fact table empty. Run ETL first.")
+        raise SystemExit("Fact table empty. Run ETL (src/etl.py) first.")
 
-    X = prepare_X(df_fact, meta, encoders)
-    # compute probs/pred
+    X = prepare_X(df_fact, meta, encoders, scaler)
+    
     probs = rf.predict_proba(X)[:, 1]
     preds = rf.predict(X)
 
     df_fact['churn_prob'] = probs
     df_fact['churn_pred'] = preds.astype(int)
 
-    # write back
     write_predictions(df_fact)
     print("Prediction complete. churn_prob and churn_pred columns updated in Fact_CustomerActivity.")
 

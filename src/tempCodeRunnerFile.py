@@ -43,12 +43,7 @@ def transform_data(df):
     return df
 
 
-# src/etl.py (Only the load_to_db function is changed)
-
-# ... (Previous imports and extract/transform functions remain the same) ...
-
 # Updated section 4️⃣ Load to MySQL Database in src/etl.py
-
 def load_to_db(df):
     try:
         # Create database if not exists using the root connection
@@ -57,7 +52,7 @@ def load_to_db(df):
             conn.commit()
             print(f"✅ Database '{DB_NAME}' checked/created successfully.")
 
-        # DataFrame creation remains the same
+        # Dimension and Fact tables... (DataFrame creation remains the same)
         dim_customer = df[['customerID', 'gender', 'SeniorCitizen', 'Partner', 'Dependents']]
         dim_services = df[['customerID', 'PhoneService', 'MultipleLines', 'InternetService',
                            'OnlineSecurity', 'OnlineBackup', 'DeviceProtection', 'TechSupport',
@@ -65,31 +60,31 @@ def load_to_db(df):
         fact_customeractivity = df[['customerID', 'tenure', 'MonthlyCharges', 'TotalCharges', 
                                     'Churn_Label', 'Tenure_Group', 'PaymentMethod']] 
 
-        # Use a single 'begin' transaction for all DDL
-        with engine.begin() as conn: 
-            
-            # Step 1: Disable and Drop Tables
+        with engine.connect() as conn:
             conn.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
             conn.execute(text("DROP TABLE IF EXISTS Fact_CustomerActivity;")) 
             conn.execute(text("DROP TABLE IF EXISTS Dim_Services;"))
             conn.execute(text("DROP TABLE IF EXISTS Dim_Customer;"))
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+            conn.commit()
 
-            # Step 2: Create Tables (PRIMARY KEY LENGTH REDUCED TO VARCHAR(20))
+            # Create Dim_Customer - ADDED ENGINE/CHARSET
             conn.execute(text("""
                 CREATE TABLE Dim_Customer (
-                    customerID VARCHAR(20) PRIMARY KEY,
+                    customerID VARCHAR(50) PRIMARY KEY,
                     gender VARCHAR(10),
                     SeniorCitizen INT,
                     Partner VARCHAR(10),
                     Dependents VARCHAR(10)
                 ) ENGINE=InnoDB CHARACTER SET utf8mb4;
             """))
+            conn.commit() # Commit Dim_Customer immediately
 
-            # Create Dim_Services (FOREIGN KEY LENGTH REDUCED TO VARCHAR(20))
+            # Create Dim_Services - ADDED ENGINE/CHARSET
             conn.execute(text("""
                 CREATE TABLE Dim_Services (
                     serviceID INT AUTO_INCREMENT PRIMARY KEY,
-                    customerID VARCHAR(20) NOT NULL,
+                    customerID VARCHAR(50) NOT NULL,
                     PhoneService VARCHAR(10),
                     MultipleLines VARCHAR(20),
                     InternetService VARCHAR(30),
@@ -106,11 +101,11 @@ def load_to_db(df):
                 ) ENGINE=InnoDB CHARACTER SET utf8mb4;
             """))
 
-            # Create Fact_CustomerActivity (FOREIGN KEY LENGTH REDUCED TO VARCHAR(20))
+            # Create Fact_CustomerActivity - ADDED ENGINE/CHARSET
             conn.execute(text("""
                 CREATE TABLE Fact_CustomerActivity (
                     churnID INT AUTO_INCREMENT PRIMARY KEY,
-                    customerID VARCHAR(20) NOT NULL,
+                    customerID VARCHAR(50) NOT NULL,
                     tenure INT,
                     MonthlyCharges FLOAT,
                     TotalCharges FLOAT,
@@ -120,16 +115,9 @@ def load_to_db(df):
                     FOREIGN KEY (customerID) REFERENCES Dim_Customer(customerID)
                 ) ENGINE=InnoDB CHARACTER SET utf8mb4;
             """))
-            
-            # Step 3: Re-enable Foreign Key Checks
-            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1;")) 
+            conn.commit()
 
-        # Step 4: Load Data (Must use the corrected dtype for the customerID column)
-        # We enforce the smaller string length here to match the new schema.
-        dim_customer['customerID'] = dim_customer['customerID'].astype(str).str[:20]
-        dim_services['customerID'] = dim_services['customerID'].astype(str).str[:20]
-        fact_customeractivity['customerID'] = fact_customeractivity['customerID'].astype(str).str[:20]
-        
+        # Load data (Unchanged)
         dim_customer.to_sql('Dim_Customer', con=engine, if_exists='append', index=False)
         dim_services.to_sql('Dim_Services', con=engine, if_exists='append', index=False)
         fact_customeractivity.to_sql('Fact_CustomerActivity', con=engine, if_exists='append', index=False)
@@ -137,6 +125,7 @@ def load_to_db(df):
         print("✅ Data successfully loaded into MySQL tables!")
 
     except Exception as e:
+        # Re-raise the error to see the full traceback if it persists
         print(f"❌ DB error: {e}")
 
 
