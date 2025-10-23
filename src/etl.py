@@ -2,13 +2,12 @@
 import pandas as pd
 from sqlalchemy import text
 from db import engine, root_engine # Import engine setup from db.py
+import os
+from dotenv import load_dotenv
 
 # -----------------------------
 # 1️⃣ Constants
 # -----------------------------
-# Import DB_NAME from environment (or fetch from db.py if needed, but safer to rely on env)
-import os
-from dotenv import load_dotenv
 load_dotenv()
 DB_NAME = os.getenv("DB_NAME", "telco_dw") 
 
@@ -26,29 +25,35 @@ def extract_data():
 # 3️⃣ Transform Data
 # -----------------------------
 def transform_data(df):
-    df.columns = df.columns.str.strip()
-    df['TotalCharges'] = pd.to_numeric(df['TotalCharges'].replace(" ", None), errors='coerce')
-    df['TotalCharges'].fillna(df['TotalCharges'].median(), inplace=True)
-    df.drop_duplicates(inplace=True)
+    # Start with a copy to avoid SettingWithCopyWarning in subsequent steps
+    df_copy = df.copy() 
+    
+    df_copy.columns = df_copy.columns.str.strip()
+    
+    # Use .loc and non-inplace assignment for explicit, clean modification (Fixes FutureWarning)
+    df_copy.loc[:, 'TotalCharges'] = pd.to_numeric(df_copy['TotalCharges'].replace(" ", None), errors='coerce')
+    
+        # Resolved: Silencing the Downcasting FutureWarning
+    median_charges = df_copy['TotalCharges'].median()
+    df_copy.loc[:, 'TotalCharges'] = df_copy['TotalCharges'].fillna(median_charges).astype('float64')
+    
+    df_copy.drop_duplicates(inplace=True)
 
-    # CRITICAL FIX 1: Add Feature Engineering (Tenure_Group) for ML scripts
+    # Add Feature Engineering (Tenure_Group)
     bins = [0, 12, 24, 48, 72]
     labels = ['0-1 year', '1-2 years', '2-4 years', '4-6 years']
-    df['Tenure_Group'] = pd.cut(df['tenure'], bins=bins, labels=labels, right=False).astype(str)
+    df_copy.loc[:, 'Tenure_Group'] = pd.cut(df_copy['tenure'], bins=bins, labels=labels, right=False).astype(str)
 
-    # CRITICAL FIX 2: Rename Target Column for ML consistency
-    df.rename(columns={'Churn': 'Churn_Label'}, inplace=True)
+    # Rename Target Column
+    df_copy.rename(columns={'Churn': 'Churn_Label'}, inplace=True)
     
     print("✅ Data transformation complete.")
-    return df
+    return df_copy
 
 
-# src/etl.py (Only the load_to_db function is changed)
-
-# ... (Previous imports and extract/transform functions remain the same) ...
-
-# Updated section 4️⃣ Load to MySQL Database in src/etl.py
-
+# -----------------------------
+# 4️⃣ Load to MySQL Database
+# -----------------------------
 def load_to_db(df):
     try:
         # Create database if not exists using the root connection
@@ -57,26 +62,33 @@ def load_to_db(df):
             conn.commit()
             print(f"✅ Database '{DB_NAME}' checked/created successfully.")
 
-        # DataFrame creation remains the same
-        dim_customer = df[['customerID', 'gender', 'SeniorCitizen', 'Partner', 'Dependents']]
+        # Create DataFrame views/slices using .copy() to avoid SettingWithCopyWarning
+        dim_customer = df[['customerID', 'gender', 'SeniorCitizen', 'Partner', 'Dependents']].copy()
         dim_services = df[['customerID', 'PhoneService', 'MultipleLines', 'InternetService',
                            'OnlineSecurity', 'OnlineBackup', 'DeviceProtection', 'TechSupport',
-                           'StreamingTV', 'StreamingMovies', 'Contract', 'PaperlessBilling', 'PaymentMethod']]
+                           'StreamingTV', 'StreamingMovies', 'Contract', 'PaperlessBilling', 'PaymentMethod']].copy()
         fact_customeractivity = df[['customerID', 'tenure', 'MonthlyCharges', 'TotalCharges', 
-                                    'Churn_Label', 'Tenure_Group', 'PaymentMethod']] 
+                                     'Churn_Label', 'Tenure_Group', 'PaymentMethod']].copy() 
 
-        # Use a single 'begin' transaction for all DDL
+        # Corrected Step: Ensure customerID is correctly truncated/typed 
+        # Use .loc for explicit assignment to suppress SettingWithCopyWarning
+        dim_customer.loc[:, 'customerID'] = dim_customer['customerID'].astype(str).str[:20]
+        dim_services.loc[:, 'customerID'] = dim_services['customerID'].astype(str).str[:20]
+        fact_customeractivity.loc[:, 'customerID'] = fact_customeractivity['customerID'].astype(str).str[:20]
+
+        # Use a single 'begin' transaction for all DDL (Schema changes)
         with engine.begin() as conn: 
             
             # Step 1: Disable and Drop Tables
             conn.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
-            conn.execute(text("DROP TABLE IF EXISTS Fact_CustomerActivity;")) 
-            conn.execute(text("DROP TABLE IF EXISTS Dim_Services;"))
-            conn.execute(text("DROP TABLE IF EXISTS Dim_Customer;"))
+            # Use CONSISTENT LOWERCASE table names in DDL
+            conn.execute(text("DROP TABLE IF EXISTS fact_customeractivity;")) 
+            conn.execute(text("DROP TABLE IF EXISTS dim_services;"))
+            conn.execute(text("DROP TABLE IF EXISTS dim_customer;"))
 
-            # Step 2: Create Tables (PRIMARY KEY LENGTH REDUCED TO VARCHAR(20))
+            # Step 2: Create Tables (using LOWERCASE names)
             conn.execute(text("""
-                CREATE TABLE Dim_Customer (
+                CREATE TABLE dim_customer (
                     customerID VARCHAR(20) PRIMARY KEY,
                     gender VARCHAR(10),
                     SeniorCitizen INT,
@@ -85,9 +97,9 @@ def load_to_db(df):
                 ) ENGINE=InnoDB CHARACTER SET utf8mb4;
             """))
 
-            # Create Dim_Services (FOREIGN KEY LENGTH REDUCED TO VARCHAR(20))
+            # Create dim_services (using LOWERCASE names)
             conn.execute(text("""
-                CREATE TABLE Dim_Services (
+                CREATE TABLE dim_services (
                     serviceID INT AUTO_INCREMENT PRIMARY KEY,
                     customerID VARCHAR(20) NOT NULL,
                     PhoneService VARCHAR(10),
@@ -102,13 +114,13 @@ def load_to_db(df):
                     Contract VARCHAR(20),
                     PaperlessBilling VARCHAR(10),
                     PaymentMethod VARCHAR(50),
-                    FOREIGN KEY (customerID) REFERENCES Dim_Customer(customerID)
+                    FOREIGN KEY (customerID) REFERENCES dim_customer(customerID)
                 ) ENGINE=InnoDB CHARACTER SET utf8mb4;
             """))
 
-            # Create Fact_CustomerActivity (FOREIGN KEY LENGTH REDUCED TO VARCHAR(20))
+            # Create fact_customeractivity (using LOWERCASE names)
             conn.execute(text("""
-                CREATE TABLE Fact_CustomerActivity (
+                CREATE TABLE fact_customeractivity (
                     churnID INT AUTO_INCREMENT PRIMARY KEY,
                     customerID VARCHAR(20) NOT NULL,
                     tenure INT,
@@ -117,22 +129,18 @@ def load_to_db(df):
                     Churn_Label VARCHAR(10),
                     Tenure_Group VARCHAR(20),
                     PaymentMethod VARCHAR(50),
-                    FOREIGN KEY (customerID) REFERENCES Dim_Customer(customerID)
+                    FOREIGN KEY (customerID) REFERENCES dim_customer(customerID)
                 ) ENGINE=InnoDB CHARACTER SET utf8mb4;
             """))
             
             # Step 3: Re-enable Foreign Key Checks
             conn.execute(text("SET FOREIGN_KEY_CHECKS = 1;")) 
 
-        # Step 4: Load Data (Must use the corrected dtype for the customerID column)
-        # We enforce the smaller string length here to match the new schema.
-        dim_customer['customerID'] = dim_customer['customerID'].astype(str).str[:20]
-        dim_services['customerID'] = dim_services['customerID'].astype(str).str[:20]
-        fact_customeractivity['customerID'] = fact_customeractivity['customerID'].astype(str).str[:20]
-        
-        dim_customer.to_sql('Dim_Customer', con=engine, if_exists='append', index=False)
-        dim_services.to_sql('Dim_Services', con=engine, if_exists='append', index=False)
-        fact_customeractivity.to_sql('Fact_CustomerActivity', con=engine, if_exists='append', index=False)
+        # Step 4: Load Data 
+        # Use CONSISTENT LOWERCASE table names in to_sql() (Fixes UserWarning)
+        dim_customer.to_sql('dim_customer', con=engine, if_exists='append', index=False)
+        dim_services.to_sql('dim_services', con=engine, if_exists='append', index=False)
+        fact_customeractivity.to_sql('fact_customeractivity', con=engine, if_exists='append', index=False)
 
         print("✅ Data successfully loaded into MySQL tables!")
 
